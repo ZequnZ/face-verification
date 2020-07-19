@@ -1,0 +1,15 @@
+version: "3.7"
+
+services:
+  nbk:
+    build:
+      context: ./
+      dockerfile: Dockerfile
+
+    volumes:
+      - ./:/app
+
+    ports:
+      - "0.0.0.0:8899:8899"
+      - "0.0.0.0:6006:6006"
+    entrypoint: [jupyter-lab,--ip=0.0.0.0, --port=8899, --no-browser, --allow-root]
