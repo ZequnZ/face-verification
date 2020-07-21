@@ -1,9 +1,10 @@
-'''Evalaute the performance of face verification'''
+"""Evalaute the performance of face verification"""
 # Author: @ZequnZ
 
 import os
 import tensorflow as tf
 import numpy as np
+import pickle
 from collections import defaultdict
 from itertools import combinations
 from PIL import Image
@@ -87,7 +88,7 @@ def get_cropped_face_img(image_path, margin=44, image_size=160):
     return cropped_face_img_dict, img_file_dict
 
 
-def get_embeddings(img_dict, model="../model", use_num_key=True):
+def face_2_embeddings(img_dict, model="../model", use_num_key=True):
     """cropped face imgs -> embeddings"""
 
     facenet_graph = tf.Graph()
@@ -128,6 +129,46 @@ def get_embeddings(img_dict, model="../model", use_num_key=True):
                     emb = sess.run(embeddings, feed_dict=feed_dict)
                     img_embeddings_dict[folder] = emb
             return img_embeddings_dict
+
+
+def get_embeddings(image_path, name, margin=44, image_size=160):
+    """image files -> embeddings"""
+
+    pnet, rnet, onet = init_mtcnn()
+
+    minsize = 20  # minimum size of face
+    threshold = [0.6, 0.7, 0.7]  # three steps's threshold
+    factor = 0.709  # scale factor
+
+    img_list = []
+    emb = {}
+
+    img = imageio.imread(os.path.expanduser(os.path.join(image_path)), pilmode="RGB",)
+    img_size = np.asarray(img.shape)[0:2]
+    bounding_boxes, points = align.detect_face.detect_face(
+        img, minsize, pnet, rnet, onet, threshold, factor
+    )
+    if len(bounding_boxes) < 1:
+        img_file_dict[folder].remove(image)
+        print("can't detect face, end")
+        return
+
+    det = np.squeeze(bounding_boxes[0, 0:4])
+    bb = np.zeros(4, dtype=np.int32)
+    bb[0] = np.maximum(det[0] - margin / 2, 0)
+    bb[1] = np.maximum(det[1] - margin / 2, 0)
+    bb[2] = np.minimum(det[2] + margin / 2, img_size[1])
+    bb[3] = np.minimum(det[3] + margin / 2, img_size[0])
+    cropped = img[bb[1] : bb[3], bb[0] : bb[2], :]
+    aligned = np.array(
+        Image.fromarray(cropped).resize((image_size, image_size), Image.BILINEAR)
+    ).astype(np.double)
+    prewhitened = facenet.prewhiten(aligned)
+    img_list.append(prewhitened)
+
+    if img_list:
+        emb[name] = np.stack(img_list)
+    return face_2_embeddings(emb, use_num_key=False)
 
 
 def get_distance_matrix(emb, img_file_dict=None):
@@ -358,13 +399,29 @@ def get_metrics(same_dict, diff_dict, img_num_dict, threshold=1):
     print("\n")
 
 
+def save_embeddings(emb, name):
+    file = open(f"./data/emb/{name}.pkl", "wb")
+    pickle.dump(emb, file)
+    file.close()
+
+
+def load_embeddings(name):
+    if not os.path.exists(f"./data/emb/{name}.pkl"):
+        print("Emb file doesn't exist.")
+        return
+    file = open(f"./data/emb/{name}.pkl", "rb")
+    emb = pickle.load(file)
+    file.close()
+    return emb
+
+
 def main(image_path, use_num_key=True, use_file_name=False):
     if use_file_name:
         cropped_face_dict, img_file_dict = get_cropped_face_img(image_path)
     else:
         cropped_face_dict, _ = get_cropped_face_img(image_path)
 
-    emb_dict = get_embeddings(cropped_face_dict, use_num_key=use_num_key)
+    emb_dict = face_2_embeddings(cropped_face_dict, use_num_key=use_num_key)
     if use_file_name:
         same_dict, diff_dict, img_num_dict = get_distance_matrix(
             emb_dict, img_file_dict
