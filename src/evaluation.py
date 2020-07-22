@@ -7,6 +7,7 @@ import numpy as np
 import pickle
 from collections import defaultdict
 from itertools import combinations
+import functools
 from PIL import Image
 import imageio
 import matplotlib.pyplot as plt
@@ -28,6 +29,45 @@ def init_mtcnn(gpu_memory_fraction=1.0, model="../model"):
         with sess.as_default():
             pnet, rnet, onet = align.detect_face.create_mtcnn(sess, None)
     return pnet, rnet, onet
+
+
+def get_thumbnails(image_path):
+    """Get the thumbnails of all the images in the image_path"""
+
+    img_list = []
+    max_length = 0
+    for folder in os.listdir(image_path):
+        if folder == ".DS_Store":
+            continue
+        row = None
+        for _, _, files in os.walk(os.path.join(image_path, folder)):
+            #             print(files)
+            for file in files:
+
+                img = imageio.imread(
+                    os.path.expanduser(os.path.join(image_path, folder, file)),
+                    pilmode="RGB",
+                )
+
+                resized = Image.fromarray(img).resize((40, 40), Image.BILINEAR)
+                if row is None:
+                    row = resized
+                else:
+                    row = np.append(row, resized, axis=1)
+            max_length = max(max_length, row.shape[1])
+            img_list.append(row)
+    imgs = list(
+        map(
+            lambda x: np.pad(
+                x,
+                ((0, 0), (0, max_length - x.shape[1]), (0, 0)),
+                "constant",
+                constant_values=(255),
+            ),
+            img_list,
+        )
+    )
+    return functools.reduce(lambda x, y: np.concatenate((x, y), axis=0), imgs)
 
 
 def get_cropped_face_img(image_path, margin=44, image_size=160):
@@ -416,6 +456,15 @@ def load_embeddings(name):
 
 
 def main(image_path, use_num_key=True, use_file_name=False):
+
+    thumbnails = get_thumbnails(image_path)
+    plt.figure(figsize=(8, 8))
+    plt.imshow(thumbnails)
+    plt.title("Thumbnails:", size=15)
+    plt.axis("off")
+    plt.show()
+    print("")
+
     if use_file_name:
         cropped_face_dict, img_file_dict = get_cropped_face_img(image_path)
     else:
