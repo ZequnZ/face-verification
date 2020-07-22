@@ -34,3 +34,8 @@ docker-compose --project-name face-recognition  -f ./docker-notebook.yml up --no
 `
 
 
+### Model
+
+Pretrained model can be download [here](https://drive.google.com/open?id=1EXPBSXwTaqrSC0OhUdXNmKSh9qJUQ55-)
+
+
