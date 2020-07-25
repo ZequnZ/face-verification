@@ -4,13 +4,16 @@
 import os
 import tensorflow as tf
 import numpy as np
+import random
 import pickle
+import math
 from collections import defaultdict
 from itertools import combinations
 import functools
 from PIL import Image
 import imageio
 import matplotlib.pyplot as plt
+from sklearn.metrics import roc_curve, auc
 import facenet
 import align.detect_face
 
@@ -31,46 +34,82 @@ def init_mtcnn(gpu_memory_fraction=1.0, model="../model"):
     return pnet, rnet, onet
 
 
-def get_thumbnails(image_path):
+def get_thumbnails(image_path, folders=None):
     """Get the thumbnails of all the images in the image_path"""
 
     img_list = []
     max_length = 0
-    for folder in os.listdir(image_path):
-        if folder == ".DS_Store":
-            continue
-        row = None
-        for _, _, files in os.walk(os.path.join(image_path, folder)):
-            #             print(files)
-            for file in files:
 
-                img = imageio.imread(
-                    os.path.expanduser(os.path.join(image_path, folder, file)),
-                    pilmode="RGB",
-                )
+    # if folders are not provided
+    if not folders:
+        for folder in os.listdir(image_path):
+            if folder == ".DS_Store":
+                continue
+            row = None
+            for _, _, files in os.walk(os.path.join(image_path, folder)):
+                for file in files:
 
-                resized = Image.fromarray(img).resize((40, 40), Image.BILINEAR)
-                if row is None:
-                    row = resized
-                else:
-                    row = np.append(row, resized, axis=1)
-            max_length = max(max_length, row.shape[1])
-            img_list.append(row)
-    imgs = list(
-        map(
-            lambda x: np.pad(
-                x,
-                ((0, 0), (0, max_length - x.shape[1]), (0, 0)),
-                "constant",
-                constant_values=(255),
-            ),
-            img_list,
+                    img = imageio.imread(
+                        os.path.expanduser(os.path.join(image_path, folder, file)),
+                        pilmode="RGB",
+                    )
+
+                    resized = Image.fromarray(img).resize((40, 40), Image.BILINEAR)
+                    if row is None:
+                        row = resized
+                    else:
+                        row = np.append(row, resized, axis=1)
+                max_length = max(max_length, row.shape[1])
+                img_list.append(row)
+        imgs = list(
+            map(
+                lambda x: np.pad(
+                    x,
+                    ((0, 0), (0, max_length - x.shape[1]), (0, 0)),
+                    "constant",
+                    constant_values=(255),
+                ),
+                img_list,
+            )
         )
-    )
-    return functools.reduce(lambda x, y: np.concatenate((x, y), axis=0), imgs)
+        return functools.reduce(lambda x, y: np.concatenate((x, y), axis=0), imgs)
+
+    # provided folders
+    else:
+        for folder in folders:
+            if folder == ".DS_Store":
+                continue
+            row = None
+            for _, _, files in os.walk(os.path.join(image_path, folder)):
+                for file in files:
+
+                    img = imageio.imread(
+                        os.path.expanduser(os.path.join(image_path, folder, file)),
+                        pilmode="RGB",
+                    )
+
+                    resized = Image.fromarray(img).resize((40, 40), Image.BILINEAR)
+                    if row is None:
+                        row = resized
+                    else:
+                        row = np.append(row, resized, axis=1)
+                max_length = max(max_length, row.shape[1])
+                img_list.append(row)
+        imgs = list(
+            map(
+                lambda x: np.pad(
+                    x,
+                    ((0, 0), (0, max_length - x.shape[1]), (0, 0)),
+                    "constant",
+                    constant_values=(255),
+                ),
+                img_list,
+            )
+        )
+        return functools.reduce(lambda x, y: np.concatenate((x, y), axis=0), imgs)
 
 
-def get_cropped_face_img(image_path, margin=44, image_size=160):
+def get_cropped_face_img(image_path, margin=44, image_size=160, folders=None):
     """return cropped face img if face is detected,
         otherwise remove the img
     """
@@ -79,9 +118,14 @@ def get_cropped_face_img(image_path, margin=44, image_size=160):
 
     img_file_dict = {}
     cropped_face_img_dict = {}
-    for folder in os.listdir(image_path):
-        for _, _, files in os.walk(os.path.join(image_path, folder)):
-            img_file_dict[folder] = files
+    if not folders:
+        for folder in os.listdir(image_path):
+            for _, _, files in os.walk(os.path.join(image_path, folder)):
+                img_file_dict[folder] = files
+    else:
+        for folder in folders:
+            for _, _, files in os.walk(os.path.join(image_path, folder)):
+                img_file_dict[folder] = files
 
     minsize = 20  # minimum size of face
     threshold = [0.6, 0.7, 0.7]  # three steps's threshold
@@ -189,7 +233,7 @@ def get_embeddings(image_path, name, margin=44, image_size=160):
         img, minsize, pnet, rnet, onet, threshold, factor
     )
     if len(bounding_boxes) < 1:
-        img_file_dict[folder].remove(image)
+        # img_file_dict[folder].remove(image)
         print("can't detect face, end")
         return
 
@@ -211,9 +255,72 @@ def get_embeddings(image_path, name, margin=44, image_size=160):
     return face_2_embeddings(emb, use_num_key=False)
 
 
-def get_distance_matrix(emb, img_file_dict=None):
+def get_distance_matrix(emb, img_file_dict=None, print_matrix=False):
     """embeddings -> distance matrix"""
 
+    distance_same_class_dict = defaultdict(list)
+    distance_diff_class_dict = defaultdict(list)
+    img_num_dict = {}
+
+    if not print_matrix:
+
+        if img_file_dict is None:
+            for person in emb:
+
+                nrof_images = emb[person].shape[0]
+                img_num_dict[person] = nrof_images
+                for i in range(nrof_images):
+                    for j in range(nrof_images):
+                        dist = np.sqrt(
+                            np.sum(
+                                np.square(
+                                    np.subtract(emb[person][i, :], emb[person][j, :])
+                                )
+                            )
+                        )
+                        if i < j:
+                            distance_same_class_dict[person].append(round(dist, 4))
+        else:
+            for person in emb:
+
+                nrof_images = emb[person].shape[0]
+                img_num_dict[person] = nrof_images
+                for i in range(nrof_images):
+                    for j in range(nrof_images):
+                        dist = np.sqrt(
+                            np.sum(
+                                np.square(
+                                    np.subtract(emb[person][i, :], emb[person][j, :])
+                                )
+                            )
+                        )
+                        if i < j:
+                            distance_same_class_dict[person].append(round(dist, 4))
+
+        if img_file_dict is None:
+
+            for x, y in combinations((emb.keys()), 2):
+                nrof_x, nrof_y = emb[x].shape[0], emb[y].shape[0]
+                for i in range(nrof_x):
+
+                    for j in range(nrof_y):
+                        dist = np.sqrt(
+                            np.sum(np.square(np.subtract(emb[x][i, :], emb[y][j, :])))
+                        )
+                        distance_diff_class_dict[(x, y)].append(round(dist, 4))
+        else:
+
+            for x, y in combinations((emb.keys()), 2):
+                nrof_x, nrof_y = emb[x].shape[0], emb[y].shape[0]
+                for i in range(nrof_x):
+                    for j in range(nrof_y):
+                        dist = np.sqrt(
+                            np.sum(np.square(np.subtract(emb[x][i, :], emb[y][j, :])))
+                        )
+                        distance_diff_class_dict[(x, y)].append(round(dist, 4))
+        return distance_same_class_dict, distance_diff_class_dict, img_num_dict
+
+    # print matrix
     print("##################################################################")
     print("##################################################################")
     print("######### Distance between images of the same person #############")
@@ -221,9 +328,6 @@ def get_distance_matrix(emb, img_file_dict=None):
     print("##################################################################")
     print("\n")
 
-    distance_same_class_dict = defaultdict(list)
-    distance_diff_class_dict = defaultdict(list)
-    img_num_dict = {}
     if img_file_dict is None:
         for person in emb:
 
@@ -333,7 +437,16 @@ def get_distance_matrix(emb, img_file_dict=None):
     return distance_same_class_dict, distance_diff_class_dict, img_num_dict
 
 
-def get_metrics(same_dict, diff_dict, img_num_dict, threshold=1):
+def get_metrics(
+    same_dict,
+    diff_dict,
+    img_num_dict,
+    threshold=1,
+    marker="o",
+    sample_rate_same=None,
+    sample_rate_diff=None,
+):
+    """Obtain some evaluation metrics"""
 
     # Avg distance
     same_dis = np.array(np.sum(list(same_dict.values())))
@@ -350,29 +463,6 @@ def get_metrics(same_dict, diff_dict, img_num_dict, threshold=1):
     print(
         f"Average distance between images of different classes: {round(sum(diff_dis)/len(diff_dis),4)}\n"
     )
-
-    print("##################################################################")
-    print("##################################################################")
-    print("#################### Scatter plot of distance ####################")
-    print("##################################################################")
-    print("##################################################################")
-    print("\n")
-    print(f"Threhold: {threshold}")
-    # scatter plot of distance
-    sd = np.random.random(len(same_dis)) / 2
-    yd = np.random.random(len(diff_dis)) / 2
-    plt.figure(figsize=(8, 8))
-    plt.scatter(diff_dis, yd, c="red", label="Diff class", alpha=0.3)
-    plt.scatter(same_dis, sd, c="blue", label="Same class", alpha=0.3)
-    plt.ylim(-0.1, 0.55)
-    plt.xlim(0, 2)
-    plt.xlabel("Distance", size=18)
-    plt.xticks(fontsize=16)
-    plt.yticks([], [])
-    plt.title("Scatter plot of distance", size=17)
-    plt.legend(fontsize=13, loc=2)
-    plt.axvline(x=threshold, c="green", dashes=(5, 5, 5, 5))
-    plt.show()
 
     print("##################################################################")
     print("##################################################################")
@@ -432,6 +522,80 @@ def get_metrics(same_dict, diff_dict, img_num_dict, threshold=1):
 
     print(f"Validation rate: {round(val,4)}")
     print(f"False accept rate: {round(far,4)}")
+
+    print("\n")
+    print("##################################################################")
+    print("##################################################################")
+    print("############################ ROC-AUC #############################")
+    print("##################################################################")
+    print("##################################################################")
+    print("\n")
+
+    maxd = max(diff_dis)
+    nor_same = same_dis / maxd
+    nor_diff = diff_dis / maxd
+    score = np.concatenate((nor_same, nor_diff))
+    label = np.concatenate((np.zeros(nor_same.shape), np.ones(nor_diff.shape)))
+    fpr, tpr, _ = roc_curve(label, score)
+    roc_auc = auc(fpr, tpr)
+
+    plt.figure(figsize=(12, 12))
+    lw = 2
+    plt.plot(
+        fpr, tpr, color="darkorange", lw=lw, label="ROC curve (area = %0.3f)" % roc_auc
+    )
+    plt.plot([0, 1], [0, 1], color="navy", lw=lw, linestyle="--")
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel("False Positive Rate", size=16)
+    plt.ylabel("True Positive Rate", size=16)
+    plt.title("Receiver operating characteristic", size=17)
+    plt.legend(loc="lower right", fontsize=13)
+    plt.show()
+
+    print("\n")
+    print("##################################################################")
+    print("##################################################################")
+    print("#################### Scatter plot of distance ####################")
+    print("##################################################################")
+    print("##################################################################")
+    print("\n")
+    print(f"Threhold: {threshold}")
+
+    # scatter plot of distance
+    if sample_rate_diff:
+        # Sample the points to make a better visualization
+        print(
+            f"{sample_rate_diff*100}% of diff class distances are sampled here in the scatterplot."
+        )
+
+        diff_dis = random.sample(
+            list(diff_dis), math.floor(len(diff_dis) * sample_rate_diff)
+        )
+
+    if sample_rate_same:
+        print(
+            f"{sample_rate_same*100}% of same class distances are sampled here in the scatterplot."
+        )
+        same_dis = random.sample(
+            list(same_dis), math.floor(len(same_dis) * sample_rate_same)
+        )
+
+    sd = np.random.random(len(same_dis)) * (max(1, int(len(diff_dis) / 100)))
+    yd = np.random.random(len(diff_dis)) * (max(1, int(len(diff_dis) / 100)))
+    plt.figure(figsize=(12, 12))
+    plt.scatter(diff_dis, yd, c="red", label="Diff class", alpha=0.3, marker=marker)
+    plt.scatter(same_dis, sd, c="blue", label="Same class", alpha=0.3, marker=marker)
+    #     plt.ylim(-0.1, 1.1)
+    plt.xlim(0, 2)
+    plt.xlabel("Distance", size=18)
+    plt.xticks(fontsize=16)
+    plt.yticks([], [])
+    plt.title("Scatter plot of distance", size=17)
+    plt.legend(fontsize=13, loc=2)
+    plt.axvline(x=threshold, c="green", dashes=(5, 5, 5, 5))
+    plt.show()
+
     print("\n")
     print("------------------------------------------------------------------")
     print("-------------------------------END--------------------------------")
@@ -440,23 +604,22 @@ def get_metrics(same_dict, diff_dict, img_num_dict, threshold=1):
 
 
 def save_embeddings(emb, name):
-    file = open(f"./data/emb/{name}.pkl", "wb")
+    file = open(f"../data/emb/{name}.pkl", "wb")
     pickle.dump(emb, file)
     file.close()
 
 
 def load_embeddings(name):
-    if not os.path.exists(f"./data/emb/{name}.pkl"):
+    if not os.path.exists(f"../data/emb/{name}.pkl"):
         print("Emb file doesn't exist.")
         return
-    file = open(f"./data/emb/{name}.pkl", "rb")
+    file = open(f"../data/emb/{name}.pkl", "rb")
     emb = pickle.load(file)
     file.close()
     return emb
 
 
-def main(image_path, use_num_key=True, use_file_name=False):
-
+def main(image_path, use_num_key=True, use_file_name=False, print_matrix=True):
     thumbnails = get_thumbnails(image_path)
     plt.figure(figsize=(8, 8))
     plt.imshow(thumbnails)
@@ -473,8 +636,44 @@ def main(image_path, use_num_key=True, use_file_name=False):
     emb_dict = face_2_embeddings(cropped_face_dict, use_num_key=use_num_key)
     if use_file_name:
         same_dict, diff_dict, img_num_dict = get_distance_matrix(
-            emb_dict, img_file_dict
+            emb_dict, img_file_dict, print_matrix=print_matrix
         )
     else:
         same_dict, diff_dict, img_num_dict = get_distance_matrix(emb_dict)
     get_metrics(same_dict, diff_dict, img_num_dict)
+
+
+def dataset_eva(
+    image_path,
+    use_num_key=True,
+    use_file_name=False,
+    folders=None,
+    marker="o",
+    sample_rate_same=None,
+    sample_rate_diff=None,
+):
+    if use_file_name:
+        cropped_face_dict, img_file_dict = get_cropped_face_img(
+            image_path, folders=folders
+        )
+    else:
+        cropped_face_dict, _ = get_cropped_face_img(image_path, folders=folders)
+
+    emb_dict = face_2_embeddings(cropped_face_dict, use_num_key=use_num_key)
+    if use_file_name:
+        same_dict, diff_dict, img_num_dict = get_distance_matrix(
+            emb_dict, img_file_dict
+        )
+    else:
+        same_dict, diff_dict, img_num_dict = get_distance_matrix(emb_dict)
+    get_metrics(
+        same_dict,
+        diff_dict,
+        img_num_dict,
+        marker=marker,
+        sample_rate_same=sample_rate_same,
+        sample_rate_diff=sample_rate_diff,
+    )
+
+
+#     return same_dict, diff_dict
