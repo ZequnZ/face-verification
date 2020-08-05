@@ -38,4 +38,7 @@ docker-compose --project-name face-recognition  -f ./docker-notebook.yml up --no
 
 Pretrained model can be download [here](https://drive.google.com/open?id=1EXPBSXwTaqrSC0OhUdXNmKSh9qJUQ55-)
 
+### Flask example
 
+I build a simple web server using *flash*.  
+Check `server.py` for details.  

@@ -1,21 +1,20 @@
 """Evalaute the performance of face verification"""
 # Author: @ZequnZ
 
-import os
-import tensorflow as tf
-import numpy as np
-import random
-import pickle
-import math
 from collections import defaultdict
 from itertools import combinations
-import functools
-from PIL import Image
+import json
+import os
+import pickle
+
 import imageio
 import matplotlib.pyplot as plt
-from sklearn.metrics import roc_curve, auc
-import facenet
+import numpy as np
+from PIL import Image
+import tensorflow as tf
+
 import align.detect_face
+import facenet
 
 
 def init_mtcnn(gpu_memory_fraction=1.0, model="../model"):
@@ -114,37 +113,27 @@ def get_cropped_face_img(image_path, margin=44, image_size=160, folders=None):
         otherwise remove the img
     """
 
-    pnet, rnet, onet = init_mtcnn()
-
-    img_file_dict = {}
-    cropped_face_img_dict = {}
-    if not folders:
-        for folder in os.listdir(image_path):
-            for _, _, files in os.walk(os.path.join(image_path, folder)):
-                img_file_dict[folder] = files
-    else:
-        for folder in folders:
-            for _, _, files in os.walk(os.path.join(image_path, folder)):
-                img_file_dict[folder] = files
-
     minsize = 20  # minimum size of face
     threshold = [0.6, 0.7, 0.7]  # three steps's threshold
     factor = 0.709  # scale factor
 
-    for folder in img_file_dict:
-        img_list = []
-        for image in img_file_dict[folder]:
+    pnet, rnet, onet = init_mtcnn()
 
-            img = imageio.imread(
-                os.path.expanduser(os.path.join(image_path, folder, image)),
-                pilmode="RGB",
-            )
+    img_file_dict = {}
+    cropped_face_img_dict = {}
+
+    if isinstance(image_path, list):
+        img_file_dict["img_list"] = image_path
+        img_list = []
+        for image in image_path:
+
+            img = imageio.imread(os.path.expanduser(image), pilmode="RGB",)
             img_size = np.asarray(img.shape)[0:2]
             bounding_boxes, points = align.detect_face.detect_face(
                 img, minsize, pnet, rnet, onet, threshold, factor
             )
             if len(bounding_boxes) < 1:
-                img_file_dict[folder].remove(image)
+                img_file_dict["img_list"].remove(image)
                 print("can't detect face, remove ", image)
                 continue
             #             print(f"bound_boxes: {bounding_boxes}")
@@ -167,9 +156,59 @@ def get_cropped_face_img(image_path, margin=44, image_size=160, folders=None):
 
         # Only add to dict when list is not empty
         if img_list:
-            cropped_face_img_dict[folder] = np.stack(img_list)
+            cropped_face_img_dict["img_list"] = np.stack(img_list)
 
-    return cropped_face_img_dict, img_file_dict
+        return cropped_face_img_dict, img_file_dict
+
+    else:
+        if not folders:
+            for folder in os.listdir(image_path):
+                for _, _, files in os.walk(os.path.join(image_path, folder)):
+                    img_file_dict[folder] = files
+        else:
+            for folder in folders:
+                for _, _, files in os.walk(os.path.join(image_path, folder)):
+                    img_file_dict[folder] = files
+
+        for folder in img_file_dict:
+            img_list = []
+            for image in img_file_dict[folder]:
+
+                img = imageio.imread(
+                    os.path.expanduser(os.path.join(image_path, folder, image)),
+                    pilmode="RGB",
+                )
+                img_size = np.asarray(img.shape)[0:2]
+                bounding_boxes, points = align.detect_face.detect_face(
+                    img, minsize, pnet, rnet, onet, threshold, factor
+                )
+                if len(bounding_boxes) < 1:
+                    img_file_dict[folder].remove(image)
+                    print("can't detect face, remove ", image)
+                    continue
+                #             print(f"bound_boxes: {bounding_boxes}")
+                #             print(f'points: {points}')
+
+                det = np.squeeze(bounding_boxes[0, 0:4])
+                bb = np.zeros(4, dtype=np.int32)
+                bb[0] = np.maximum(det[0] - margin / 2, 0)
+                bb[1] = np.maximum(det[1] - margin / 2, 0)
+                bb[2] = np.minimum(det[2] + margin / 2, img_size[1])
+                bb[3] = np.minimum(det[3] + margin / 2, img_size[0])
+                cropped = img[bb[1] : bb[3], bb[0] : bb[2], :]
+                aligned = np.array(
+                    Image.fromarray(cropped).resize(
+                        (image_size, image_size), Image.BILINEAR
+                    )
+                ).astype(np.double)
+                prewhitened = facenet.prewhiten(aligned)
+                img_list.append(prewhitened)
+
+            # Only add to dict when list is not empty
+            if img_list:
+                cropped_face_img_dict[folder] = np.stack(img_list)
+
+        return cropped_face_img_dict, img_file_dict
 
 
 def face_2_embeddings(img_dict, model="../model", use_num_key=True):
@@ -216,7 +255,7 @@ def face_2_embeddings(img_dict, model="../model", use_num_key=True):
 
 
 def get_embeddings(image_path, name, margin=44, image_size=160):
-    """image files -> embeddings"""
+    """image file -> embeddings"""
 
     pnet, rnet, onet = init_mtcnn()
 
@@ -227,13 +266,16 @@ def get_embeddings(image_path, name, margin=44, image_size=160):
     img_list = []
     emb = {}
 
-    img = imageio.imread(os.path.expanduser(os.path.join(image_path)), pilmode="RGB",)
+    if isinstance(image_path, str):
+        img = imageio.imread(
+            os.path.expanduser(os.path.join(image_path)), pilmode="RGB"
+        )
     img_size = np.asarray(img.shape)[0:2]
     bounding_boxes, points = align.detect_face.detect_face(
         img, minsize, pnet, rnet, onet, threshold, factor
     )
     if len(bounding_boxes) < 1:
-        # img_file_dict[folder].remove(image)
+        #         img_file_dict[folder].remove(image)
         print("can't detect face, end")
         return
 
@@ -255,7 +297,7 @@ def get_embeddings(image_path, name, margin=44, image_size=160):
     return face_2_embeddings(emb, use_num_key=False)
 
 
-def get_distance_matrix(emb, img_file_dict=None, print_matrix=False):
+def get_distance_matrix(emb, img_file_dict=None, print_matrix=False, same_only=False):
     """embeddings -> distance matrix"""
 
     distance_same_class_dict = defaultdict(list)
@@ -264,60 +306,33 @@ def get_distance_matrix(emb, img_file_dict=None, print_matrix=False):
 
     if not print_matrix:
 
-        if img_file_dict is None:
-            for person in emb:
+        for person in emb:
 
-                nrof_images = emb[person].shape[0]
-                img_num_dict[person] = nrof_images
-                for i in range(nrof_images):
-                    for j in range(nrof_images):
-                        dist = np.sqrt(
-                            np.sum(
-                                np.square(
-                                    np.subtract(emb[person][i, :], emb[person][j, :])
-                                )
-                            )
+            nrof_images = emb[person].shape[0]
+            img_num_dict[person] = nrof_images
+            for i in range(nrof_images):
+                for j in range(nrof_images):
+                    dist = np.sqrt(
+                        np.sum(
+                            np.square(np.subtract(emb[person][i, :], emb[person][j, :]))
                         )
-                        if i < j:
-                            distance_same_class_dict[person].append(round(dist, 4))
-        else:
-            for person in emb:
+                    )
+                    if i < j:
+                        distance_same_class_dict[person].append(round(dist, 4))
 
-                nrof_images = emb[person].shape[0]
-                img_num_dict[person] = nrof_images
-                for i in range(nrof_images):
-                    for j in range(nrof_images):
-                        dist = np.sqrt(
-                            np.sum(
-                                np.square(
-                                    np.subtract(emb[person][i, :], emb[person][j, :])
-                                )
-                            )
-                        )
-                        if i < j:
-                            distance_same_class_dict[person].append(round(dist, 4))
+        if same_only:
+            return distance_same_class_dict
 
-        if img_file_dict is None:
+        for x, y in combinations((emb.keys()), 2):
+            nrof_x, nrof_y = emb[x].shape[0], emb[y].shape[0]
+            for i in range(nrof_x):
 
-            for x, y in combinations((emb.keys()), 2):
-                nrof_x, nrof_y = emb[x].shape[0], emb[y].shape[0]
-                for i in range(nrof_x):
+                for j in range(nrof_y):
+                    dist = np.sqrt(
+                        np.sum(np.square(np.subtract(emb[x][i, :], emb[y][j, :])))
+                    )
+                    distance_diff_class_dict[(x, y)].append(round(dist, 4))
 
-                    for j in range(nrof_y):
-                        dist = np.sqrt(
-                            np.sum(np.square(np.subtract(emb[x][i, :], emb[y][j, :])))
-                        )
-                        distance_diff_class_dict[(x, y)].append(round(dist, 4))
-        else:
-
-            for x, y in combinations((emb.keys()), 2):
-                nrof_x, nrof_y = emb[x].shape[0], emb[y].shape[0]
-                for i in range(nrof_x):
-                    for j in range(nrof_y):
-                        dist = np.sqrt(
-                            np.sum(np.square(np.subtract(emb[x][i, :], emb[y][j, :])))
-                        )
-                        distance_diff_class_dict[(x, y)].append(round(dist, 4))
         return distance_same_class_dict, distance_diff_class_dict, img_num_dict
 
     # print matrix
@@ -446,7 +461,6 @@ def get_metrics(
     sample_rate_same=None,
     sample_rate_diff=None,
 ):
-    """Obtain some evaluation metrics"""
 
     # Avg distance
     same_dis = np.array(np.sum(list(same_dict.values())))
@@ -478,6 +492,36 @@ def get_metrics(
     print(f"total: {total} images")
     print("\n")
 
+    print("\n")
+    print("##################################################################")
+    print("##################################################################")
+    print("############################ ROC-AUC #############################")
+    print("##################################################################")
+    print("##################################################################")
+    print("\n")
+
+    maxd = max(diff_dis)
+    nor_same = same_dis / maxd
+    nor_diff = diff_dis / maxd
+    score = np.concatenate((nor_same, nor_diff))
+    label = np.concatenate((np.zeros(nor_same.shape), np.ones(nor_diff.shape)))
+    fpr, tpr, _ = roc_curve(label, score)
+    roc_auc = auc(fpr, tpr)
+
+    plt.figure(figsize=(12, 12))
+    lw = 2
+    plt.plot(
+        fpr, tpr, color="darkorange", lw=lw, label="ROC curve (area = %0.3f)" % roc_auc
+    )
+    plt.plot([0, 1], [0, 1], color="navy", lw=lw, linestyle="--")
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel("False Positive Rate", size=16)
+    plt.ylabel("True Positive Rate", size=16)
+    plt.title("Receiver operating characteristic", size=17)
+    plt.legend(loc="lower right", fontsize=13)
+    plt.show()
+
     # sample wise metric
     print("##################################################################")
     print("##################################################################")
@@ -485,6 +529,7 @@ def get_metrics(
     print("##################################################################")
     print("##################################################################")
     print("\n")
+
     tp, tn, fp, fn = 0, 0, 0, 0
     tp = sum(same_dis <= threshold)
     tn = sum(diff_dis > threshold)
@@ -492,6 +537,7 @@ def get_metrics(
     fn = sum(same_dis > threshold)
     f1_score = tp / (tp + 0.5 * (fp + fn))
 
+    print(f"Threhold: {threshold}")
     print(f"True positive: {tp}")
     print(f"True negative: {tn}")
     print(f"False positive: {fp}")
@@ -522,36 +568,6 @@ def get_metrics(
 
     print(f"Validation rate: {round(val,4)}")
     print(f"False accept rate: {round(far,4)}")
-
-    print("\n")
-    print("##################################################################")
-    print("##################################################################")
-    print("############################ ROC-AUC #############################")
-    print("##################################################################")
-    print("##################################################################")
-    print("\n")
-
-    maxd = max(diff_dis)
-    nor_same = same_dis / maxd
-    nor_diff = diff_dis / maxd
-    score = np.concatenate((nor_same, nor_diff))
-    label = np.concatenate((np.zeros(nor_same.shape), np.ones(nor_diff.shape)))
-    fpr, tpr, _ = roc_curve(label, score)
-    roc_auc = auc(fpr, tpr)
-
-    plt.figure(figsize=(12, 12))
-    lw = 2
-    plt.plot(
-        fpr, tpr, color="darkorange", lw=lw, label="ROC curve (area = %0.3f)" % roc_auc
-    )
-    plt.plot([0, 1], [0, 1], color="navy", lw=lw, linestyle="--")
-    plt.xlim([0.0, 1.0])
-    plt.ylim([0.0, 1.05])
-    plt.xlabel("False Positive Rate", size=16)
-    plt.ylabel("True Positive Rate", size=16)
-    plt.title("Receiver operating characteristic", size=17)
-    plt.legend(loc="lower right", fontsize=13)
-    plt.show()
 
     print("\n")
     print("##################################################################")
@@ -619,7 +635,7 @@ def load_embeddings(name):
     return emb
 
 
-def main(image_path, use_num_key=True, use_file_name=False, print_matrix=True):
+def folder_eva(image_path, use_num_key=True, use_file_name=False, print_matrix=True):
     thumbnails = get_thumbnails(image_path)
     plt.figure(figsize=(8, 8))
     plt.imshow(thumbnails)
@@ -651,6 +667,7 @@ def dataset_eva(
     marker="o",
     sample_rate_same=None,
     sample_rate_diff=None,
+    threshold=1,
 ):
     if use_file_name:
         cropped_face_dict, img_file_dict = get_cropped_face_img(
@@ -673,7 +690,17 @@ def dataset_eva(
         marker=marker,
         sample_rate_same=sample_rate_same,
         sample_rate_diff=sample_rate_diff,
+        threshold=threshold,
     )
 
 
-#     return same_dict, diff_dict
+def img_eva(image_path):
+
+    cropped_face_dict, _ = get_cropped_face_img(image_path)
+    print(len(cropped_face_dict["img_list"]))
+    emb_dict = face_2_embeddings(cropped_face_dict)
+    print(len(emb_dict[0]))
+    same_dict = get_distance_matrix(emb_dict, same_only=True)
+    same_dict[0] = list(map(lambda x: float(x), same_dict[0]))
+    print(dict(same_dict), same_dict[0])
+    return json.dumps(dict(same_dict))
